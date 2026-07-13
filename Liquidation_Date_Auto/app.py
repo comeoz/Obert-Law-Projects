@@ -1,0 +1,172 @@
+"""
+Liquidation Date Auto-Lookup — web app
+--------------------------------------
+Upload an Excel file that contains CBP entry numbers. For each entry number the
+app queries the official CBP liquidation bulletin and adds the liquidation date
+to a new column, then lets you download the same file back with the dates filled
+in.
+
+Run it with:
+    streamlit run app.py
+"""
+
+import io
+import time
+
+import pandas as pd
+import streamlit as st
+
+from cbp_client import CBPClient, CBPClientError
+
+st.set_page_config(page_title="Liquidation Date Lookup", page_icon="⚖️", layout="centered")
+
+st.title("⚖️ Liquidation Date Auto-Lookup")
+st.write(
+    "Upload an Excel file of CBP **entry numbers**. The app looks up each entry's "
+    "official liquidation date on the "
+    "[CBP liquidation bulletin](https://trade.cbp.dhs.gov/ace/liquidation/LBNotice/) "
+    "and returns the same file with the dates added."
+)
+
+DATE_COLUMN_DEFAULT = "Liquidation Date"
+STATUS_COLUMN = "Lookup Status"
+
+
+def guess_entry_column(columns):
+    """Pre-select the column whose name looks most like an entry-number column."""
+    for i, col in enumerate(columns):
+        name = str(col).strip().lower()
+        if "entry" in name or name in {"entry number", "entry_no", "entryno", "entry #"}:
+            return i
+    return 0
+
+
+uploaded = st.file_uploader("Upload Excel file (.xlsx or .xls)", type=["xlsx", "xls"])
+
+if uploaded is None:
+    st.info("Choose an Excel file to get started.")
+    st.stop()
+
+# Read every column as text so entry numbers keep their exact form
+# (no scientific notation, no lost leading zeros).
+try:
+    df = pd.read_excel(uploaded, dtype=str)
+except Exception as exc:  # noqa: BLE001 - surface any read error to the user
+    st.error(f"Could not read that Excel file: {exc}")
+    st.stop()
+
+if df.empty:
+    st.warning("That file has no rows.")
+    st.stop()
+
+st.subheader("Preview")
+st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+st.caption(f"{len(df):,} rows loaded.")
+
+st.subheader("Settings")
+col_left, col_right = st.columns(2)
+with col_left:
+    entry_col = st.selectbox(
+        "Which column holds the entry numbers?",
+        list(df.columns),
+        index=guess_entry_column(df.columns),
+    )
+with col_right:
+    date_col_name = st.text_input("Name for the new date column", DATE_COLUMN_DEFAULT)
+
+delay = st.slider(
+    "Pause between lookups (seconds)",
+    min_value=0.0, max_value=2.0, value=0.4, step=0.1,
+    help="A short pause keeps CBP from rate-limiting the requests. Raise it if you "
+         "see 'rate limited' errors on large files.",
+)
+
+unique_entries = df[entry_col].map(CBPClient.normalize_entry)
+n_nonblank = int((unique_entries != "").sum())
+n_unique = unique_entries[unique_entries != ""].nunique()
+st.caption(
+    f"{n_nonblank:,} rows have an entry number "
+    f"({n_unique:,} unique — duplicates are only looked up once)."
+)
+
+if not st.button("🔎 Look up liquidation dates", type="primary"):
+    st.stop()
+
+# --------------------------------------------------------------------- #
+# Run the lookups
+# --------------------------------------------------------------------- #
+try:
+    client = CBPClient(request_delay=delay)
+except CBPClientError as exc:
+    st.error(f"Could not connect to the CBP website: {exc}")
+    st.stop()
+
+progress = st.progress(0.0)
+status_line = st.empty()
+
+dates = []
+statuses = []
+total = len(df)
+start_time = time.time()
+
+for i, raw_value in enumerate(df[entry_col]):
+    result = client.lookup(raw_value)
+    dates.append(result["liquidation_date"])
+    statuses.append(result["status"])
+
+    done = i + 1
+    progress.progress(done / total)
+    elapsed = time.time() - start_time
+    rate = done / elapsed if elapsed > 0 else 0
+    remaining = (total - done) / rate if rate > 0 else 0
+    status_line.text(
+        f"Processed {done:,}/{total:,}  •  ~{remaining:0.0f}s remaining"
+    )
+
+progress.progress(1.0)
+
+df[date_col_name] = dates
+df[STATUS_COLUMN] = statuses
+
+# --------------------------------------------------------------------- #
+# Summary + download
+# --------------------------------------------------------------------- #
+n_liquidated = sum(s == "LIQUIDATED" for s in statuses)
+n_not_found = sum(s.startswith("NOT FOUND") for s in statuses)
+n_not_liq = sum(s.startswith("NOT LIQUIDATED") for s in statuses)
+n_errors = sum(s.startswith("ERROR") for s in statuses)
+n_empty = sum(s.startswith("EMPTY") for s in statuses)
+
+status_line.empty()
+st.success(f"Done in {time.time() - start_time:0.0f} seconds.")
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Liquidated", f"{n_liquidated:,}")
+m2.metric("Not liquidated", f"{n_not_liq:,}")
+m3.metric("Not found", f"{n_not_found:,}")
+m4.metric("Errors", f"{n_errors:,}")
+if n_empty:
+    st.caption(f"{n_empty:,} rows had no entry number and were skipped.")
+if n_errors:
+    st.warning(
+        f"{n_errors:,} rows returned an error (see the '{STATUS_COLUMN}' column). "
+        "You can re-run the file to retry just those."
+    )
+
+st.subheader("Results")
+st.dataframe(df, use_container_width=True, hide_index=True)
+
+# Write the enriched dataframe back to an .xlsx in memory.
+buffer = io.BytesIO()
+with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+    df.to_excel(writer, index=False)
+buffer.seek(0)
+
+base_name = uploaded.name.rsplit(".", 1)[0]
+st.download_button(
+    "⬇️ Download Excel with liquidation dates",
+    data=buffer.getvalue(),
+    file_name=f"{base_name}_with_liquidation_dates.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    type="primary",
+)
