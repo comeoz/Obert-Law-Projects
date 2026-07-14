@@ -24,9 +24,20 @@ import requests
 BASE_URL = "https://trade.cbp.dhs.gov/ace/liquidation/LBNotice/"
 SEARCH_URL = BASE_URL + "search"
 
-# Which event names count as a "liquidation" for our purposes.
-# Matches "Liquidated" and "Reliquidated".
-_LIQUIDATION_KEYWORD = "LIQUIDAT"
+# CBP bulletin event codes (from the site's own "Event" filter dropdown):
+#   L = Liquidated, R = Re-liquidated, E = Extended, S = Suspended
+# We record the most recent date seen for each of these as its own column, so an
+# entry that has, say, an Extension *and* a Liquidation *and* a Re-liquidation
+# keeps all three dates.
+_EVENT_DATE_KEYS = {
+    "L": "liquidation_date",
+    "R": "reliquidation_date",
+    "E": "extension_date",
+    "S": "suspension_date",
+}
+
+# Codes that mean the entry has actually (re)liquidated.
+_LIQUIDATION_CODES = {"L", "R"}
 
 
 class CBPClientError(Exception):
@@ -116,24 +127,33 @@ class CBPClient:
         """
         Look up a single entry number.
 
-        Returns a dict:
+        Returns a dict with one key per column the CBP bulletin website shows,
+        plus a human-readable status. Every value is a plain string ('' when not
+        applicable):
+
           {
-            "entry_number"    : normalized entry number,
-            "liquidation_date": 'YYYY-MM-DD' or '',
-            "event"           : e.g. 'Liquidated' / 'Extension' / '',
-            "status"          : human-readable status, e.g.
-                                'LIQUIDATED', 'NOT LIQUIDATED', 'NOT FOUND',
-                                'EMPTY', 'ERROR: ...'
+            "entry_number"      : normalized entry number,
+            "status"            : 'LIQUIDATED' / 'NOT LIQUIDATED (...)' /
+                                  'NOT FOUND (...)' / 'EMPTY (...)' / 'ERROR: ...',
+            "event_type"        : the operative event, e.g. 'Liquidated',
+            "liquidation_date"  : date of the 'Liquidated' event    (YYYY-MM-DD),
+            "reliquidation_date": date of the 'Re-liquidated' event,
+            "extension_date"    : date of the 'Extended' event,
+            "suspension_date"   : date of the 'Suspended' event,
+            "posted_date"       : bulletin posted date of the operative event,
+            "voided_date"       : voided date of the operative event,
+            "basis"             : basis of the operative event,
+            "action"            : action of the operative event,
+            "port_of_entry"     : port of entry,
+            "entry_date"        : entry date,
+            "entry_type"        : entry type code,
+            "team"              : CBP team,
+            "filer"             : filer code,
           }
         """
         entry = self.normalize_entry(entry_number)
         if not entry:
-            return {
-                "entry_number": "",
-                "liquidation_date": "",
-                "event": "",
-                "status": "EMPTY (no entry number in this row)",
-            }
+            return self._blank_result("", "EMPTY (no entry number in this row)")
 
         if entry in self._cache:
             return self._cache[entry]
@@ -212,48 +232,76 @@ class CBPClient:
 
         records = (data.get("data") or {}).get("data") or []
         if not records:
-            return {
-                "entry_number": entry,
-                "liquidation_date": "",
-                "event": "",
-                "status": "NOT FOUND (no bulletin notice for this entry)",
-            }
+            return self._blank_result(
+                entry, "NOT FOUND (no bulletin notice for this entry)"
+            )
 
-        # Among all events for this entry, keep the liquidation ones.
+        result = self._blank_result(entry, "")
+
+        # One date column per event type: keep the most recent date for each.
+        for code, key in _EVENT_DATE_KEYS.items():
+            matches = [r for r in records if str(r.get("eventCode", "")).upper() == code]
+            if matches:
+                latest = max(matches, key=lambda r: r.get("eventDate") or "")
+                result[key] = _format_date(latest.get("eventDate"))
+
+        # Entry-level fields are identical across an entry's events; read them
+        # from the most recent record.
+        newest = max(records, key=lambda r: r.get("eventDate") or "")
+        result["port_of_entry"] = _clean(newest.get("portOfEntry"))
+        result["entry_date"] = _format_date(newest.get("entryDate"))
+        result["entry_type"] = _clean(newest.get("entryType"))
+        result["team"] = _clean(newest.get("teamNumber"))
+        result["filer"] = _clean(newest.get("filer"))
+
+        # The "operative" event drives the descriptive columns (posted/voided
+        # date, basis, action). Prefer the most recent (Re-)liquidation; if the
+        # entry hasn't liquidated, fall back to the most recent event of any kind.
         liquidations = [
             r for r in records
-            if _LIQUIDATION_KEYWORD in str(r.get("event", "")).upper()
-            or str(r.get("eventCode", "")).upper() == "L"
+            if str(r.get("eventCode", "")).upper() in _LIQUIDATION_CODES
         ]
-
         if liquidations:
-            # If several, take the most recent event date.
-            latest = max(liquidations, key=lambda r: r.get("eventDate") or "")
-            return {
-                "entry_number": entry,
-                "liquidation_date": _format_date(latest.get("eventDate")),
-                "event": latest.get("event", "Liquidated"),
-                "status": "LIQUIDATED",
-            }
+            primary = max(liquidations, key=lambda r: r.get("eventDate") or "")
+            result["status"] = "LIQUIDATED"
+        else:
+            primary = newest
+            events = ", ".join(
+                sorted({str(r.get("event", "")).strip() for r in records if r.get("event")})
+            )
+            result["status"] = f"NOT LIQUIDATED (on file: {events or 'unknown event'})"
 
-        # Records exist, but none are liquidations (e.g. Extension / Suspension).
-        other = records[0]
-        events = ", ".join(sorted({str(r.get("event", "")).strip() for r in records if r.get("event")}))
-        return {
-            "entry_number": entry,
-            "liquidation_date": "",
-            "event": other.get("event", ""),
-            "status": f"NOT LIQUIDATED (on file: {events or 'unknown event'})",
-        }
+        result["event_type"] = _clean(primary.get("event"))
+        result["posted_date"] = _format_date(primary.get("postedDate"))
+        result["voided_date"] = _format_date(primary.get("voidedDate"))
+        result["basis"] = _clean(primary.get("basis"))
+        result["action"] = _clean(primary.get("action"))
+        return result
 
     @staticmethod
-    def _error_result(entry, message):
+    def _blank_result(entry, status):
+        """An all-columns result dict with everything blank but entry + status."""
         return {
             "entry_number": entry,
+            "status": status,
+            "event_type": "",
             "liquidation_date": "",
-            "event": "",
-            "status": f"ERROR: {message}",
+            "reliquidation_date": "",
+            "extension_date": "",
+            "suspension_date": "",
+            "posted_date": "",
+            "voided_date": "",
+            "basis": "",
+            "action": "",
+            "port_of_entry": "",
+            "entry_date": "",
+            "entry_type": "",
+            "team": "",
+            "filer": "",
         }
+
+    def _error_result(self, entry, message):
+        return self._blank_result(entry, f"ERROR: {message}")
 
 
 # ---------------------------------------------------------------------- #
@@ -267,6 +315,14 @@ def _format_date(iso_value):
     if not iso_value:
         return ""
     return str(iso_value).split("T", 1)[0]
+
+
+def _clean(value):
+    """Turn a possibly-None API value into a trimmed string ('' for None/NaN)."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    return "" if s.lower() == "nan" else s
 
 
 # ---------------------------------------------------------------------- #

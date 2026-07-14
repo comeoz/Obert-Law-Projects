@@ -1,8 +1,9 @@
 # Liquidation Date Auto-Lookup
 
 A small web app that takes an Excel file of CBP **entry numbers**, looks up each
-one's official **liquidation date** on the CBP liquidation bulletin, and returns
-the same file with the dates added in a new column.
+one on the CBP liquidation bulletin, and returns the same file with every column
+the bulletin website shows added — liquidation date, plus any re-liquidation,
+extension, or suspension, and the entry's port, dates, basis, action, and team.
 
 It talks directly to the CBP bulletin's JSON search API (the same one the
 official site uses), so there is no slow, fragile browser automation.
@@ -13,15 +14,25 @@ official site uses), so there is no slow, fragile browser automation.
 
 1. You upload an `.xlsx` / `.xls` file.
 2. You pick which column contains the entry numbers.
-3. For each entry number it queries CBP and finds the **Liquidated** event date.
-4. You download the same spreadsheet back with two new columns:
-   - **Liquidation Date** — `YYYY-MM-DD`, blank if the entry is not liquidated.
-   - **Lookup Status** — why a date is present or blank, e.g.
-     `LIQUIDATED`, `NOT LIQUIDATED (on file: Extension)`,
-     `NOT FOUND (no bulletin notice for this entry)`, or an error message.
+3. For each entry number it queries CBP and reads back every bulletin event.
+4. You download the same spreadsheet, one row per input row, with these columns
+   appended (mirroring the CBP bulletin's own table):
+   - **Lookup Status** — `LIQUIDATED`, `NOT LIQUIDATED (on file: …)`,
+     `NOT FOUND (no bulletin notice for this entry)`, `EMPTY`, or an error.
+   - **Event Type** — the operative event (e.g. `Liquidated`, `Re-liquidated`).
+   - **Liquidation Date**, **Re-liquidation Date**, **Extension Date**,
+     **Suspension Date** — one date column per event type (`YYYY-MM-DD`), so an
+     entry that was extended, liquidated *and* re-liquidated keeps all its dates.
+   - **Posted Date**, **Voided Date**, **Basis**, **Action** — details of the
+     operative (most recent liquidation) event.
+   - **Port of Entry**, **Entry Date**, **Entry Type**, **Team**, **Filer** —
+     entry-level details.
+
+   Blank date/detail columns mean that event type isn't on file for the entry.
 
 Entry numbers can be written with or without dashes (`E860-4347391` or
 `E8604347391`) — both work. Duplicate entry numbers are only looked up once.
+Re-running an already-processed file just refreshes these columns in place.
 
 ## Setup (first time only)
 

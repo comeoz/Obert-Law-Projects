@@ -28,8 +28,29 @@ st.write(
     "and returns the same file with the dates added."
 )
 
-DATE_COLUMN_DEFAULT = "Liquidation Date"
 STATUS_COLUMN = "Lookup Status"
+
+# Columns appended to the output file, in order. Each is (result-dict key,
+# spreadsheet column header). These mirror the columns the CBP bulletin website
+# shows, with the single "Liquidation Date" split into one date column per event
+# type so extensions / suspensions / re-liquidations are all captured.
+OUTPUT_COLUMNS = [
+    ("status", STATUS_COLUMN),
+    ("event_type", "Event Type"),
+    ("liquidation_date", "Liquidation Date"),
+    ("reliquidation_date", "Re-liquidation Date"),
+    ("extension_date", "Extension Date"),
+    ("suspension_date", "Suspension Date"),
+    ("posted_date", "Posted Date"),
+    ("voided_date", "Voided Date"),
+    ("basis", "Basis"),
+    ("action", "Action"),
+    ("port_of_entry", "Port of Entry"),
+    ("entry_date", "Entry Date"),
+    ("entry_type", "Entry Type"),
+    ("team", "Team"),
+    ("filer", "Filer"),
+]
 
 
 def guess_entry_column(columns):
@@ -64,15 +85,11 @@ st.dataframe(df.head(10), use_container_width=True, hide_index=True)
 st.caption(f"{len(df):,} rows loaded.")
 
 st.subheader("Settings")
-col_left, col_right = st.columns(2)
-with col_left:
-    entry_col = st.selectbox(
-        "Which column holds the entry numbers?",
-        list(df.columns),
-        index=guess_entry_column(df.columns),
-    )
-with col_right:
-    date_col_name = st.text_input("Name for the new date column", DATE_COLUMN_DEFAULT)
+entry_col = st.selectbox(
+    "Which column holds the entry numbers?",
+    list(df.columns),
+    index=guess_entry_column(df.columns),
+)
 
 delay = st.slider(
     "Pause between lookups (seconds)",
@@ -104,15 +121,12 @@ except CBPClientError as exc:
 progress = st.progress(0.0)
 status_line = st.empty()
 
-dates = []
-statuses = []
+results = []
 total = len(df)
 start_time = time.time()
 
 for i, raw_value in enumerate(df[entry_col]):
-    result = client.lookup(raw_value)
-    dates.append(result["liquidation_date"])
-    statuses.append(result["status"])
+    results.append(client.lookup(raw_value))
 
     done = i + 1
     progress.progress(done / total)
@@ -125,17 +139,25 @@ for i, raw_value in enumerate(df[entry_col]):
 
 progress.progress(1.0)
 
-df[date_col_name] = dates
-df[STATUS_COLUMN] = statuses
+# Append every CBP column (overwriting any same-named column from a prior run).
+for key, colname in OUTPUT_COLUMNS:
+    df[colname] = [r[key] for r in results]
 
 # --------------------------------------------------------------------- #
 # Summary + download
 # --------------------------------------------------------------------- #
+statuses = [r["status"] for r in results]
 n_liquidated = sum(s == "LIQUIDATED" for s in statuses)
 n_not_found = sum(s.startswith("NOT FOUND") for s in statuses)
 n_not_liq = sum(s.startswith("NOT LIQUIDATED") for s in statuses)
 n_errors = sum(s.startswith("ERROR") for s in statuses)
 n_empty = sum(s.startswith("EMPTY") for s in statuses)
+
+# How many entries carry each of the "extra" events, so the user can see at a
+# glance whether any re-liquidations / extensions / suspensions turned up.
+n_reliquidated = sum(bool(r["reliquidation_date"]) for r in results)
+n_extended = sum(bool(r["extension_date"]) for r in results)
+n_suspended = sum(bool(r["suspension_date"]) for r in results)
 
 status_line.empty()
 st.success(f"Done in {time.time() - start_time:0.0f} seconds.")
@@ -145,6 +167,12 @@ m1.metric("Liquidated", f"{n_liquidated:,}")
 m2.metric("Not liquidated", f"{n_not_liq:,}")
 m3.metric("Not found", f"{n_not_found:,}")
 m4.metric("Errors", f"{n_errors:,}")
+
+e1, e2, e3 = st.columns(3)
+e1.metric("With re-liquidation", f"{n_reliquidated:,}")
+e2.metric("With extension", f"{n_extended:,}")
+e3.metric("With suspension", f"{n_suspended:,}")
+
 if n_empty:
     st.caption(f"{n_empty:,} rows had no entry number and were skipped.")
 if n_errors:
