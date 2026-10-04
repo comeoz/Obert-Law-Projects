@@ -21,7 +21,7 @@ official site uses), so there is no slow, fragile browser automation.
      `NOT FOUND (no bulletin notice for this entry)`, `EMPTY`, or an error.
    - **Event Type** — the operative event (e.g. `Liquidated`, `Re-liquidated`).
    - **Liquidation Date**, **Re-liquidation Date**, **Extension Date**,
-     **Suspension Date** — one date column per event type (`YYYY-MM-DD`), so an
+     **Suspension Date** — one date column per event type (`MM/DD/YYYY`), so an
      entry that was extended, liquidated *and* re-liquidated keeps all its dates.
    - **Posted Date**, **Voided Date**, **Basis**, **Action** — details of the
      operative (most recent liquidation) event.

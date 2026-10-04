@@ -136,7 +136,7 @@ class CBPClient:
             "status"            : 'LIQUIDATED' / 'NOT LIQUIDATED (...)' /
                                   'NOT FOUND (...)' / 'EMPTY (...)' / 'ERROR: ...',
             "event_type"        : the operative event, e.g. 'Liquidated',
-            "liquidation_date"  : date of the 'Liquidated' event    (YYYY-MM-DD),
+            "liquidation_date"  : date of the 'Liquidated' event    (MM/DD/YYYY),
             "reliquidation_date": date of the 'Re-liquidated' event,
             "extension_date"    : date of the 'Extended' event,
             "suspension_date"   : date of the 'Suspended' event,
@@ -310,11 +310,16 @@ class CBPClient:
 def _format_date(iso_value):
     """
     CBP returns dates like '2026-07-10T04:00:00.000+00:00'. We only want the
-    calendar date -> '2026-07-10'.
+    calendar date, in US format -> '07/10/2026'.
     """
     if not iso_value:
         return ""
-    return str(iso_value).split("T", 1)[0]
+    day = str(iso_value).split("T", 1)[0]
+    try:
+        year, month, dom = day.split("-")
+    except ValueError:
+        return day  # unexpected shape: pass it through rather than lose it
+    return f"{month}/{dom}/{year}"
 
 
 def _clean(value):
