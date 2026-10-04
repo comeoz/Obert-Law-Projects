@@ -52,6 +52,11 @@ OUTPUT_COLUMNS = [
     ("filer", "Filer"),
 ]
 
+DATE_COLUMNS = [
+    "Liquidation Date", "Re-liquidation Date", "Extension Date",
+    "Suspension Date", "Posted Date", "Voided Date", "Entry Date",
+]
+
 
 def guess_entry_column(columns):
     """Pre-select the column whose name looks most like an entry-number column."""
@@ -184,10 +189,20 @@ if n_errors:
 st.subheader("Results")
 st.dataframe(df, use_container_width=True, hide_index=True)
 
-# Write the enriched dataframe back to an .xlsx in memory.
+# Write the enriched dataframe back to an .xlsx in memory. Date columns are
+# stored as real Excel dates with a fixed yyyy-mm-dd display format, so Excel
+# doesn't re-render them in the viewer's regional format (e.g. DD/MM/YYYY).
+out = df.copy()
+for colname in DATE_COLUMNS:
+    out[colname] = pd.to_datetime(out[colname], format="%Y-%m-%d", errors="coerce")
 buffer = io.BytesIO()
 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-    df.to_excel(writer, index=False)
+    out.to_excel(writer, index=False)
+    sheet = writer.sheets["Sheet1"]
+    for col_idx, colname in enumerate(out.columns, start=1):
+        if colname in DATE_COLUMNS:
+            for (cell,) in sheet.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                cell.number_format = "yyyy-mm-dd"
 buffer.seek(0)
 
 base_name = uploaded.name.rsplit(".", 1)[0]
